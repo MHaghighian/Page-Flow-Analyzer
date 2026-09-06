@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Page Flow Analyzer</title>
+  <link rel="stylesheet" href="sidepanel.css" />
+</head>
+<body>
+  <header>
+    <div class="title-row">
+      <h1>Page Flow Analyzer</h1>
+      <span class="pill">v3.2 · side panel</span>
+    </div>
+    <p class="sub" id="pageMeta">Waiting for page… Hard-refresh the tab if empty.</p>
+  </header>
+
+  <div class="toolbar">
+    <button id="btnRefresh" class="primary">Refresh</button>
+    <button id="btnPick">Pick value</button>
+    <button id="btnExport">Export</button>
+    <button id="btnClear" class="danger">Clear</button>
+  </div>
+
+  <div class="tabs" id="tabs"></div>
+  <div class="status" id="status">Open a page, then click Refresh. Drag the side panel edge to resize.</div>
+  <main id="body"></main>
+
+  <script src="sidepanel.js" type="module"></script>
+</body>
+</html>

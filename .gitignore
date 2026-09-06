@@ -1,0 +1,12 @@
+.DS_Store
+Thumbs.db
+*.log
+node_modules/
+.chrome-profile/
+*-chrome-profile/
+.env
+.env.*
+*.pem
+.idea/
+.vscode/
+*.zip
