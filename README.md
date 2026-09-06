@@ -6,7 +6,6 @@ Chrome MV3 extension that automatically tracks **SOURCE → TRANSIT → SINK** d
 
 UI is English-only and lives in the **Chrome Side Panel** (resizable; does not cover the page).
 
-**Version:** 3.3.0
 
 ---
 
