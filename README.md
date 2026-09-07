@@ -1,26 +1,27 @@
-# Page Flow Analyzer
+# DOM Hacker
 
-Chrome MV3 extension that automatically tracks **SOURCE → TRANSIT → SINK** data flows on any page, with rich **DOM** and **BOM** inventories.
+Chrome MV3 extension for **client-side taint hunting**: poison sources with canaries, wrap sinks, and classify hits (`xss`, `redirect`, `cookie`, `websocket`, …). Also pairs **HTTP** and **WebSocket** traffic and correlates **API → DOM** effects.
 
 **Repository:** https://github.com/MHaghighian/Page-Flow-Analyzer
 
-UI is English-only and lives in the **Chrome Side Panel** (resizable; does not cover the page).
+Work lives in the **Chrome Side Panel**. The popup is a thin status + Hunt toggle.
 
+Internal message types still use the `PFA_*` prefix from the Page Flow Analyzer cutover.
 
 ---
 
 ## Features
 
-- **Auto harvest** of interesting values (JWT, scoped tokens like `FD.…`, UUID, auth query params, storage keys, …)
-- **SOURCE → SINK traces** for each watched value (which channel introduced it, which sink consumed it)
-- **Network** hooks: `fetch` / XHR (request + response), WebSocket
-- **Storage** hooks: `localStorage` / `sessionStorage`
-- **Messaging**: `postMessage` in/out
-- **DOM sinks** (sampled for performance): `innerHTML`, `setAttribute(href|src|on*)`, `document.write`, `location.assign/replace`
-- **Full BOM dump** (MDN-oriented): complete `navigator` (including prototype-chain `rawDump`), `location`, `history`, `screen`, `visualViewport`, `window`, `document`, `performance`, storage, permissions, API presence
-- **Rich DOM inventory**: counts, forms, iframes, scripts, styles, inputs, links, media, framework hints, dangerous handlers
-- **Export JSON** for offline analysis
-- Optional **Pick value** (page FAB or Side Panel button)
+- **Collect scope**: **This tab**, **This origin**, or **All** http(s) pages
+- **Hunt** (off by default; hard-refresh after enabling): poisons catalog sources with per-source canaries (`DhCnRy…`) and wraps catalog sinks
+- **Findings**: SOURCE → SINK with context, encoding, provenance, stack, cssPath, attack class, severity
+- **Effects**: fetch/XHR responses linked to MutationObserver nodes (time window + string match)
+- **Network**: one row per HTTP exchange (request + response); hide static/telemetry by default
+- **Messages**: postMessage (origin on every row) and WebSocket frames grouped by connection URL
+- **Token traces**: JWT/UUID/auth harvest (unchanged)
+- **DOM / BOM** inventories
+- Per-tab **search** (`/` to focus, Esc to clear)
+- On-page **DH** FAB for optional Pick
 
 ---
 
@@ -28,13 +29,9 @@ UI is English-only and lives in the **Chrome Side Panel** (resizable; does not c
 
 1. Open Chrome → `chrome://extensions`
 2. Enable **Developer mode**
-3. **Load unpacked** → select this folder:
-   ```
-   page-flow-analyzer/
-   ```
-4. Open any site and **hard-refresh** (`Ctrl+Shift+R`) so content scripts inject
-5. Click the extension icon → Side Panel opens  
-   Drag the panel edge to resize
+3. **Load unpacked** → select this folder
+4. Click the extension icon → Side Panel opens
+5. Pin **This tab** (or origin / all), then hard-refresh (`Ctrl+Shift+R`)
 
 After every code change: **Reload** the extension, then hard-refresh the page.
 
@@ -45,58 +42,44 @@ After every code change: **Reload** the extension, then hard-refresh the page.
 | Action | How |
 |--------|-----|
 | Open UI | Click extension icon (Side Panel) |
-| See SOURCE→SINK | Tab **traces** |
-| Host traffic map | Tab **flows** |
-| Live events | **network** / **sources** / **sinks** / **storage** / **messages** |
-| Browser environment | Tab **bom** (check `navigator` + `navigator.rawDump`) |
-| Page structure | Tab **dom** |
-| Manual watch | **Pick value** or green **PFA** button on page |
-| Dump everything | **Export** |
+| Collect this tab | **This tab** |
+| Hunt DOM taint | **Hunt**, then hard-refresh |
+| Canary hits | Tab **findings** (filter by class chips) |
+| API rendered into DOM | Tab **effects** → highlight / open in network |
+| Packed HTTP | Tab **network** |
+| postMessage + WS | Tab **messages** |
+| Token SOURCE→SINK | Tab **traces** |
 
-Auto-refresh runs in the Side Panel. Prefer **Refresh** after heavy navigation.
+Empty findings with Hunt off is expected. Hunt on but not reloaded shows a banner.
 
 ---
 
-## Source → Sink model
+## Taint model
 
-Inspired by:
+Every finding is `source → sink` with a canary. Attack class is derived from the sink (PortSwigger DOM-based classes). Hunt does **not** rewrite the URL bar — getter poisoning is the canary.
 
-- [PortSwigger – DOM XSS sources & sinks](https://portswigger.net/web-security/cross-site-scripting/dom-based)
-- Taintaru-style runtime watches
-- Super-app research (scoped tokens / SSO / Frame Bridge)
+Catalog: `content/xss-catalog.js` (DOM Invader ranks + PortSwigger lists). jQuery hooks apply only if `$` / `jQuery` exists.
 
-### Auto SOURCES
-
-`location.href|search|hash`, `document.referrer`, `document.cookie`, `window.name`, storage reads, form inputs, network responses, `postMessage` in, WebSocket in.
-
-### Auto SINKS
-
-`fetch`/`XHR` requests, `storage.setItem`, `postMessage` out, WebSocket out, DOM HTML sinks (sampled), `setAttribute`, `location.assign` / `replace`.
-
-### Traces tab
-
-For each value:
-
-- **chain** — ordered path of channels  
-  e.g. `source.localStorage → network.request.url → sink.network.request`
-- **pairs** — explicit `SOURCE chip → SINK chip` with details
-- Colors: green = SOURCE, yellow = TRANSIT, blue = SINK
+Out of scope for this phase: auto-exploit, postMessage origin-spoof PoCs, prototype pollution, DOM clobbering, CSP / Trusted Types / service-worker takeover, WS protocol fuzzing.
 
 ---
 
 ## Project layout
 
 ```
-page-flow-analyzer/
-├── manifest.json              # MV3 manifest
-├── background.js              # Side panel + report relay
+Page-Flow-Analyzer/
+├── manifest.json
+├── background.js              # Scope, inject, hunt flag, highlight relay
 ├── content/
+│   ├── xss-catalog.js         # Sources, sinks, ranks, attackClass
 │   ├── main-hook.js           # MAIN world hooks (document_start)
-│   ├── bom-collect.js         # Full BOM / navigator collector
-│   └── isolated.js            # Watches, traces, DOM inventory, FAB
+│   ├── hunt-boot.js           # Isolated: tell MAIN hunt flag early
+│   ├── bom-collect.js
+│   └── isolated.js            # Findings, effects, pairing, FAB
 ├── ui/
-│   ├── sidepanel.html|css|js  # Main UI (Side Panel)
-│   └── popup.*                # Legacy helpers (optional)
+│   ├── fonts/                 # Inter + JetBrains Mono (bundled)
+│   ├── sidepanel.html|css|js
+│   └── popup.*
 ├── icons/
 └── README.md
 ```
@@ -108,21 +91,19 @@ page-flow-analyzer/
 | Permission | Why |
 |------------|-----|
 | `sidePanel` | Resizable browser UI |
-| `tabs` / `activeTab` / `scripting` | Talk to the active page |
-| `storage` | Extension state |
+| `tabs` / `activeTab` / `scripting` | Inject hooks into in-scope pages |
+| `webNavigation` | Re-attach when a pinned tab navigates |
+| `storage` | Collect scope + Hunt flag |
 | `downloads` | Export JSON |
-| `<all_urls>` | Analyze any site you open |
-
-Hooks are rate-limited and DOM sink logging is sampled so SPAs (e.g. Angular) stay responsive.
+| `<all_urls>` | Analyze sites you explicitly scope to |
 
 ---
 
 ## Tips
 
-- If the Side Panel is empty: hard-refresh the tab, then **Refresh** in the panel.
-- Sensitive storage keys are redacted in previews (`[redacted len=…]`).
-- Only a small **PFA** FAB stays on the page; the big overlay panel was removed on purpose.
-- Snapp example: open `app.snapp.taxi` while logged in and watch tokens travel under **traces** / **flows**.
+- If the Side Panel is empty: pin a collect scope, hard-refresh, then **Refresh**.
+- Hunt is invasive (canaries on getters / storage / responses). Use only on systems you are authorized to analyze.
+- Default collect scope is **This tab**.
 
 ---
 

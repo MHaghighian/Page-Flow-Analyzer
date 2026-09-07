@@ -2,23 +2,23 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <title>PFA</title>
+  <title>DOM Hacker</title>
   <link rel="stylesheet" href="popup.css" />
 </head>
 <body>
   <header>
-    <h1>Page Flow Analyzer v3</h1>
-    <p class="sub" id="pageMeta">AUTO source→sink · English panel on the right</p>
+    <h1>DOM Hacker</h1>
+    <p class="sub" id="pageMeta">Pin a tab, Hunt, then hard-refresh.</p>
   </header>
   <div class="actions">
-    <button id="btnPanel" class="primary">Show / focus page panel</button>
-    <button id="btnExport">Export JSON</button>
+    <button id="btnPanel" class="primary">Open side panel</button>
+    <button id="btnHunt" class="hunt">Hunt</button>
+    <button id="btnExport">Export</button>
     <button id="btnClear" class="danger">Clear</button>
   </div>
-  <section id="status" class="card ok">Panel auto-refreshes. Values are harvested automatically (URL, storage, network, inputs…). Pick is optional.</section>
-  <section class="card"><h2>Counters</h2><div class="grid" id="counts"></div></section>
-  <section class="card"><h2>Watches</h2><div id="watches" class="list"></div></section>
-  <section class="card"><h2>Host flows</h2><div id="flows" class="list"></div></section>
+  <section id="scope" class="card">Collect: —</section>
+  <section id="status" class="card ok">Work happens in the side panel.</section>
+  <section class="card"><h2>Counts</h2><div class="grid" id="counts"></div></section>
   <script src="popup.js" type="module"></script>
 </body>
 </html>

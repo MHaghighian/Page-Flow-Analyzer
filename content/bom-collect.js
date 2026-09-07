@@ -3,6 +3,37 @@ function pfaSafeCall(fn, fallback = null) {
   try { return fn(); } catch { return fallback; }
 }
 
+function pfaObjectTag(v) {
+  try { return Object.prototype.toString.call(v); } catch { return ''; }
+}
+
+function pfaIsSwContainer(obj) {
+  if (obj == null || typeof obj !== 'object') return false;
+  return pfaObjectTag(obj) === '[object ServiceWorkerContainer]';
+}
+
+function pfaSkipProp(obj, key) {
+  if (key === 'serviceWorker') return 'navigator.serviceWorker';
+  if (key === 'ready') return 'getter.ready';
+  if (key === 'then') return 'thenable';
+  if (pfaIsSwContainer(obj)) return 'ServiceWorkerContainer';
+  return null;
+}
+
+function pfaReadProp(obj, key) {
+  const skip = pfaSkipProp(obj, key);
+  if (skip) return { __skipped: skip };
+  let value;
+  try { value = obj[key]; }
+  catch (e) { return { __error: String(e.message || e) }; }
+  if (pfaIsSwContainer(value)) return { __skipped: 'ServiceWorkerContainer' };
+  if (value != null && typeof value.then === 'function') {
+    try { value.then(undefined, () => {}); } catch {}
+    return { __type: 'Promise', name: key };
+  }
+  return { __ok: true, value };
+}
+
 function pfaCreateBomCollector({ soft, storageDump, state, watchMap }) {
   function serializeValue(v, depth = 1, seen = null) {
     const bag = seen || new WeakSet();
@@ -13,18 +44,24 @@ function pfaCreateBomCollector({ soft, storageDump, state, watchMap }) {
     if (t === 'bigint') return `${v}n`;
     if (t === 'symbol') return String(v);
     if (t === 'function') {
-      return {
-        __type: 'function',
-        name: v.name || '(anonymous)',
-        length: v.length,
-        native: /\{\s*\[native code\]\s*\}/.test(String(v)),
-      };
+      let name = '(anonymous)';
+      let length = 0;
+      let native = false;
+      try { name = v.name || name; } catch {}
+      try { length = v.length; } catch {}
+      try { native = /\{\s*\[native code\]\s*\}/.test(Function.prototype.toString.call(v)); } catch {}
+      return { __type: 'function', name, length, native };
     }
     if (t !== 'object') return soft(String(v), 200);
+    if (pfaIsSwContainer(v)) return { __type: 'ServiceWorkerContainer', __skipped: 'not readable in content scripts' };
     if (v === window) return { __ref: 'window' };
     if (v === document) return { __ref: 'document' };
     if (v === location) return { __ref: 'location' };
     if (v === navigator) return { __ref: 'navigator' };
+    if (typeof v.then === 'function') {
+      try { v.then(undefined, () => {}); } catch {}
+      return { __type: 'Promise' };
+    }
     if (bag.has(v)) return { __ref: 'circular' };
     try { bag.add(v); } catch {}
 
@@ -39,9 +76,7 @@ function pfaCreateBomCollector({ soft, storageDump, state, watchMap }) {
       };
     }
     if (depth <= 0) {
-      let preview = '';
-      try { preview = soft(JSON.stringify(v), 120); } catch { preview = String(v); }
-      return { __type: v.constructor?.name || 'Object', preview };
+      return { __type: pfaObjectTag(v).slice(8, -1) || v.constructor?.name || 'Object' };
     }
     if (ArrayBuffer.isView?.(v) || v instanceof ArrayBuffer) {
       return { __type: v.constructor?.name || 'ArrayBuffer', byteLength: v.byteLength || v.buffer?.byteLength };
@@ -54,7 +89,12 @@ function pfaCreateBomCollector({ soft, storageDump, state, watchMap }) {
     let n = 0;
     for (const k of [...keys].sort()) {
       if (n++ > 120) { out.__truncatedKeys = true; break; }
-      try { out[k] = serializeValue(v[k], depth - 1, bag); }
+      const got = pfaReadProp(v, k);
+      if (!got.__ok) {
+        out[k] = got;
+        continue;
+      }
+      try { out[k] = serializeValue(got.value, depth - 1, bag); }
       catch (e) { out[k] = { __error: String(e.message || e) }; }
     }
     return out;
@@ -84,13 +124,13 @@ function pfaCreateBomCollector({ soft, storageDump, state, watchMap }) {
     for (const key of out.propertyNames) {
       if (key === 'constructor') continue;
       if (n++ >= maxKeys) { out.__truncated = true; break; }
-      let value;
-      try { value = obj[key]; }
-      catch (e) {
-        out.presence[key] = false;
-        out.properties[key] = { __error: String(e.message || e) };
+      const got = pfaReadProp(obj, key);
+      if (!got.__ok) {
+        out.presence[key] = !got.__error;
+        out.properties[key] = got;
         continue;
       }
+      const value = got.value;
       out.presence[key] = value !== undefined;
       if (typeof value === 'function') {
         out.methods.push(key);
@@ -142,7 +182,7 @@ function pfaCreateBomCollector({ soft, storageDump, state, watchMap }) {
         mediaDevices: !!nav.mediaDevices, mediaSession: !!nav.mediaSession,
         permissions: !!nav.permissions, preferences: !!nav.preferences,
         presentation: !!nav.presentation, scheduling: !!nav.scheduling,
-        serial: !!nav.serial, serviceWorker: !!nav.serviceWorker, storage: !!nav.storage,
+        serial: !!nav.serial, serviceWorker: 'serviceWorker' in nav, storage: !!nav.storage,
         usb: !!nav.usb, userActivation: !!nav.userActivation, userAgentData: !!nav.userAgentData,
         virtualKeyboard: !!nav.virtualKeyboard, wakeLock: !!nav.wakeLock,
         windowControlsOverlay: !!nav.windowControlsOverlay, xr: !!nav.xr,
@@ -348,18 +388,9 @@ function pfaCreateBomCollector({ soft, storageDump, state, watchMap }) {
     try { if (self.caches?.keys) cacheNames = await caches.keys(); } catch {}
 
     let serviceWorkers = [];
-    try {
-      if (navigator.serviceWorker?.getRegistrations) {
-        const regs = await navigator.serviceWorker.getRegistrations();
-        serviceWorkers = regs.map((r) => ({
-          scope: r.scope,
-          active: r.active?.scriptURL || null,
-          waiting: r.waiting?.scriptURL || null,
-          installing: r.installing?.scriptURL || null,
-          updateViaCache: r.updateViaCache,
-        }));
-      }
-    } catch {}
+    if ('serviceWorker' in navigator) {
+      serviceWorkers = [{ __skipped: 'ServiceWorkerContainer is not readable from a content script' }];
+    }
 
     const permissionNames = [
       'notifications', 'geolocation', 'camera', 'microphone', 'clipboard-read', 'clipboard-write',

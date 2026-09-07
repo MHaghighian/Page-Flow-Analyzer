@@ -1,4 +1,7 @@
 (() => {
+  if (window.__PFA_ISOLATED__) return;
+  window.__PFA_ISOLATED__ = true;
+
   const SOURCE = 'pfa-main-hook';
   const ISOLATED_SRC = 'pfa-isolated';
   const MAX = { network: 2500, mutations: 1200, hits: 3000, sinks: 1500, sources: 800 };
@@ -14,13 +17,55 @@
     sinks: [],
     autoSources: [],
     watchHits: [],
+    findings: [],
+    effects: [],
   };
+  const recentApis = [];
+  let huntEnabled = false;
+  let huntApplied = false;
+  let catalogMeta = { sourceCount: 0, sinkCount: 0 };
 
   /** @type {Map<string, any>} */
   const watchMap = new Map();
   let pickMode = false;
   let highlightEl = null;
   let fab = null;
+  let collectEnabled = false;
+  let booted = false;
+  let pushTimer = null;
+  let pushTimeout = null;
+  let bgFlush = null;
+  let syncTimer = null;
+
+  function runtimeAlive() {
+    try { return Boolean(chrome.runtime?.id); } catch { return false; }
+  }
+
+  function stopBackgroundWork() {
+    collectEnabled = false;
+    if (pushTimer) { clearInterval(pushTimer); pushTimer = null; }
+    if (pushTimeout) { clearTimeout(pushTimeout); pushTimeout = null; }
+    if (bgFlush) { clearTimeout(bgFlush); bgFlush = null; }
+    if (syncTimer) { clearTimeout(syncTimer); syncTimer = null; }
+  }
+
+  function killIfDead() {
+    if (runtimeAlive()) return false;
+    stopBackgroundWork();
+    return true;
+  }
+
+  window.addEventListener('unhandledrejection', (e) => {
+    const msg = String(e.reason?.message || e.reason || '');
+    if (
+      msg.includes('ServiceWorkerContainer')
+      || msg.includes("'ready' is only supported in pages")
+      || msg.includes('Extension context invalidated')
+    ) {
+      e.preventDefault();
+    }
+    if (msg.includes('Extension context invalidated')) stopBackgroundWork();
+  });
 
   function push(arr, item, max) {
     arr.push(item);
@@ -98,8 +143,24 @@
     else w.paths.set(key, { key, role, channel, detail: soft(detail, 300), count: 1, firstSeen: entry.t });
   }
 
-  let syncTimer = null;
+  function tellMainHunt(enabled) {
+    try {
+      if (enabled) sessionStorage.setItem('__DH_HUNT__', '1');
+      else sessionStorage.removeItem('__DH_HUNT__');
+    } catch {}
+    try {
+      window.postMessage({ source: ISOLATED_SRC, cmd: 'setXssHunt', enabled: !!enabled }, '*');
+    } catch {}
+  }
+
+  function tellMainEnabled(enabled) {
+    try {
+      window.postMessage({ source: ISOLATED_SRC, cmd: 'setEnabled', enabled: !!enabled }, '*');
+    } catch {}
+  }
+
   function syncWatches() {
+    if (!collectEnabled) return;
     if (syncTimer) return;
     syncTimer = setTimeout(() => {
       syncTimer = null;
@@ -109,22 +170,43 @@
     }, 200);
   }
 
+  function pingBg(payload) {
+    if (killIfDead()) return;
+    try {
+      chrome.runtime.sendMessage(payload, () => {
+        const err = chrome.runtime.lastError?.message || '';
+        if (err.includes('Extension context invalidated')) stopBackgroundWork();
+      });
+    } catch {
+      stopBackgroundWork();
+    }
+  }
+
   let bgQueue = [];
-  let bgFlush = null;
   function queueBg(event) {
+    if (killIfDead() || !collectEnabled) return;
     bgQueue.push(event);
     if (bgQueue.length > 200) bgQueue.splice(0, bgQueue.length - 200);
     if (bgFlush) return;
     bgFlush = setTimeout(() => {
       bgFlush = null;
       const batch = bgQueue.splice(0, 40);
-      for (const ev of batch) {
-        chrome.runtime.sendMessage({ type: 'PFA_EVENT', event: ev }).catch(() => {});
-      }
+      for (const ev of batch) pingBg({ type: 'PFA_EVENT', event: ev });
     }, 300);
   }
 
-  function onEvent(rest) {
+  const pendingEvents = [];
+
+  function applyLifecycle(rest) {
+    if (rest.phase === 'hunt-applied' || rest.phase === 'hunt' || rest.phase === 'hook-ready') {
+      if (rest.phase === 'hunt-applied') huntApplied = true;
+      if (typeof rest.huntApplied === 'boolean') huntApplied = rest.huntApplied;
+      if (typeof rest.huntEnabled === 'boolean') huntEnabled = rest.huntEnabled;
+    }
+    if (rest.sourceCount) catalogMeta = { sourceCount: rest.sourceCount, sinkCount: rest.sinkCount || catalogMeta.sinkCount };
+  }
+
+  function ingest(rest) {
     if (rest.kind === 'network') push(state.network, rest, MAX.network);
     else if (rest.kind === 'postMessage') push(state.postMessages, rest, 400);
     else if (rest.kind === 'websocket') push(state.websockets, rest, 400);
@@ -144,8 +226,43 @@
       push(state.watchHits, rest, MAX.hits);
       const w = watchMap.get(rest.value);
       if (w) hit(w, rest.channel, rest.detail, rest.role ? String(rest.role).toUpperCase() : undefined);
+    } else if (rest.kind === 'finding') {
+      const key = `${rest.source}|${rest.sink}|${rest.canary}|${rest.encoded}`;
+      if (!state.findings.some((f) => `${f.source}|${f.sink}|${f.canary}|${f.encoded}` === key)) {
+        push(state.findings, rest, 400);
+      }
+    } else if (rest.kind === 'lifecycle') {
+      applyLifecycle(rest);
     }
+    if (rest.kind === 'network' && rest.phase === 'response') noteApiResponse(rest);
     queueBg(rest);
+  }
+
+  function onEvent(rest) {
+    if (!collectEnabled) {
+      if (rest.kind === 'lifecycle') applyLifecycle(rest);
+      pendingEvents.push(rest);
+      if (pendingEvents.length > 500) pendingEvents.splice(0, pendingEvents.length - 500);
+      return;
+    }
+    ingest(rest);
+  }
+
+  function flushPending() {
+    try {
+      if (globalThis.__DH_EARLY_ON__) {
+        window.removeEventListener('message', globalThis.__DH_EARLY_ON__);
+        globalThis.__DH_EARLY_ON__ = null;
+      }
+    } catch {}
+    const early = (globalThis.__DH_EARLY__ || []).splice(0);
+    for (const ev of early) {
+      if (!ev || ev.source !== SOURCE) continue;
+      const { source, ...rest } = ev;
+      ingest(rest);
+    }
+    const batch = pendingEvents.splice(0);
+    for (const rest of batch) ingest(rest);
   }
 
   window.addEventListener('message', (e) => {
@@ -153,26 +270,62 @@
     const { source, ...rest } = e.data;
     onEvent(rest);
   });
+  try {
+    if (globalThis.__DH_EARLY_ON__) {
+      window.removeEventListener('message', globalThis.__DH_EARLY_ON__);
+      globalThis.__DH_EARLY_ON__ = null;
+    }
+  } catch {}
 
   let mutBudget = 0;
   setInterval(() => { mutBudget = 0; }, 1000);
   const mo = new MutationObserver((list) => {
-    if (mutBudget > 30) return;
+    if (!collectEnabled) return;
+    if (mutBudget > 40 && !recentApis.length) return;
     for (const m of list) {
-      if (m.target?.closest?.('#pfa-fab,#pfa-pick-mask')) continue;
+      if (m.target?.closest?.('#pfa-fab,#pfa-pick-mask,.pfa-hl')) continue;
       mutBudget++;
-      if (state.mutations.length < MAX.mutations) {
-        state.mutations.push({
-          type: m.type,
-          target: m.target?.nodeName,
-          addedCount: m.addedNodes.length,
-          removedCount: m.removedNodes.length,
-          t: Date.now(),
+      const added = [...m.addedNodes].filter((n) => n.nodeType === 1);
+      const rec = {
+        type: m.type,
+        target: m.target?.nodeName,
+        addedCount: m.addedNodes.length,
+        removedCount: m.removedNodes.length,
+        attr: m.attributeName || null,
+        t: Date.now(),
+      };
+      if (state.mutations.length < MAX.mutations) state.mutations.push(rec);
+
+      const nodes = [];
+      if (m.type === 'childList') {
+        for (const n of added) {
+          nodes.push({
+            cssPath: soft(cssPath(n), 160),
+            tag: n.nodeName,
+            preview: soft((n.textContent || '').replace(/\s+/g, ' ').trim(), 180),
+            html: soft(n.outerHTML, 220),
+          });
+        }
+      } else if (m.type === 'attributes' && m.target?.nodeType === 1) {
+        nodes.push({
+          cssPath: soft(cssPath(m.target), 160),
+          tag: m.target.nodeName,
+          preview: `${m.attributeName}=${soft(m.target.getAttribute(m.attributeName), 80)}`,
+          html: '',
+        });
+      } else if (m.type === 'characterData' && m.target?.parentElement) {
+        nodes.push({
+          cssPath: soft(cssPath(m.target.parentElement), 160),
+          tag: m.target.parentElement.nodeName,
+          preview: soft(m.target.textContent, 180),
+          html: '',
         });
       }
+
+      if (nodes.length) linkDomEffect(nodes, rec.t, m.type);
+
       if (!watchMap.size) continue;
-      for (const n of m.addedNodes) {
-        if (n.nodeType !== 1) continue;
+      for (const n of added) {
         const text = (n.textContent || '').slice(0, 1500);
         if (text.length < 6) continue;
         for (const [val, w] of watchMap) {
@@ -182,7 +335,51 @@
     }
   });
   if (document.documentElement) {
-    mo.observe(document.documentElement, { childList: true, subtree: true, attributes: false });
+    mo.observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['href', 'src', 'value', 'action'], characterData: true });
+  }
+
+  function noteApiResponse(n) {
+    if (n.category === 'static' || n.category === 'telemetry') return;
+    const strings = n.extractedStrings || [];
+    recentApis.unshift({
+      id: n.id, url: n.url, method: n.method, t: n.t || Date.now(),
+      host: n.host, status: n.status, strings, category: n.category,
+    });
+    if (recentApis.length > 40) recentApis.length = 40;
+  }
+
+  function linkDomEffect(nodes, t, mutType) {
+    const windowMs = 2000;
+    const live = recentApis.filter((a) => t - a.t < windowMs);
+    if (!live.length) return;
+    let best = live[0];
+    let how = 'time';
+    const blob = nodes.map((n) => `${n.preview} ${n.html}`).join('\n');
+    for (const api of live) {
+      if ((api.strings || []).some((s) => s.length >= 8 && blob.includes(s))) {
+        best = api;
+        how = 'content';
+        break;
+      }
+    }
+    if (how === 'time' && mutType === 'attributes') return;
+    const effect = {
+      id: best.id,
+      method: best.method,
+      url: best.url,
+      status: best.status,
+      how,
+      t,
+      nodes: nodes.slice(0, 12),
+    };
+    const prev = state.effects.find((e) => e.id === best.id);
+    if (prev) {
+      prev.nodes = [...prev.nodes, ...effect.nodes].slice(0, 40);
+      prev.t = t;
+      if (how === 'content') prev.how = 'content';
+    } else {
+      push(state.effects, effect, 200);
+    }
   }
 
   function storageDump(store) {
@@ -484,20 +681,80 @@
     });
   }
 
-  async function buildReport(includeHeavy = true) {
+  function pairNetwork() {
+    const map = new Map();
+    for (const n of state.network) {
+      if (!n.id) continue;
+      const row = map.get(n.id) || {
+        id: n.id, api: n.api, method: n.method, url: n.url, host: n.host, category: n.category,
+        frame: n.frame, t: n.t, requestBody: '', responseBody: '', status: null, ok: null,
+        durationMs: null, phase: 'pending', extractedStrings: [],
+      };
+      if (n.phase === 'request') {
+        row.requestBody = n.requestBody || row.requestBody;
+        row.method = n.method || row.method;
+        row.url = n.url || row.url;
+        row.t = n.t || row.t;
+      } else {
+        row.status = n.status;
+        row.ok = n.ok;
+        row.durationMs = n.durationMs;
+        row.responseBody = n.responseBody || row.responseBody;
+        row.extractedStrings = n.extractedStrings || row.extractedStrings;
+        row.phase = n.phase === 'error' || n.ok === false ? 'failed' : 'done';
+      }
+      map.set(n.id, row);
+    }
+    return [...map.values()].sort((a, b) => (b.t || 0) - (a.t || 0));
+  }
+
+  function pairWs() {
+    const map = new Map();
+    for (const w of state.websockets) {
+      if (!w.id) continue;
+      const row = map.get(w.id) || { id: w.id, url: w.url, host: w.host, frames: [], t: w.t };
+      if (w.phase === 'open-attempt') {
+        row.url = w.url;
+        row.host = w.host;
+        row.protocols = w.protocols;
+      } else {
+        row.frames.push({ direction: w.direction, data: w.data, t: w.t });
+        if (row.frames.length > 80) row.frames.splice(0, row.frames.length - 80);
+      }
+      map.set(w.id, row);
+    }
+    return [...map.values()];
+  }
+
+  let lastHeavyAt = 0;
+  let lastBom = null;
+  let lastDom = null;
+
+  async function buildReport(includeHeavy = false) {
     const traces = buildTraces();
     const mapped = traces.filter((t) => t.hasSink).length;
-    let bom = null;
-    let dom = null;
-    if (includeHeavy) {
-      try { bom = await bomSnapshot(); } catch (e) { bom = { error: String(e) }; }
-      try { dom = domInventory(); } catch (e) { dom = { error: String(e) }; }
+    const findings = [...state.findings].sort((a, b) => (a.rank || 90) - (b.rank || 90));
+    const classCounts = {};
+    for (const f of findings) classCounts[f.attackClass || 'other'] = (classCounts[f.attackClass || 'other'] || 0) + 1;
+    const networkExchanges = pairNetwork();
+    const wsExchanges = pairWs();
+    let bom = lastBom;
+    let dom = lastDom;
+    if (includeHeavy && Date.now() - lastHeavyAt > 15000) {
+      try { lastBom = await bomSnapshot(); } catch (e) { lastBom = { error: String(e) }; }
+      try { lastDom = domInventory(); } catch (e) { lastDom = { error: String(e) }; }
+      lastHeavyAt = Date.now();
+      bom = lastBom;
+      dom = lastDom;
     }
+    const classBits = Object.entries(classCounts).map(([k, v]) => `${v} ${k}`).join(' · ');
     return {
       pageUrl: location.href,
       title: document.title,
+      hunt: { enabled: huntEnabled, applied: huntApplied, ...catalogMeta },
       counts: {
         network: state.network.length,
+        exchanges: networkExchanges.length,
         mutations: state.mutations.length,
         autoSources: state.autoSources.length,
         sinks: state.sinks.length,
@@ -506,10 +763,17 @@
         inputs: state.inputs.length,
         storage: state.storage.length,
         tracedWithSink: mapped,
+        findings: findings.length,
+        effects: state.effects.length,
         bomSections: bom ? Object.keys(bom).length : 0,
         domElements: dom?.counts?.elements || 0,
       },
+      classCounts,
       traces,
+      findings: findings.slice(0, 200),
+      effects: state.effects.slice(-80).reverse(),
+      networkExchanges: networkExchanges.slice(0, 120),
+      wsExchanges,
       watches: watchesList().map((w) => ({
         value: soft(w.value, 120),
         originType: w.originType,
@@ -527,8 +791,8 @@
       bom,
       dom,
       narrative: [
-        `${watchMap.size} watched values · ${mapped} with SOURCE→SINK mapping.`,
-        bom ? `BOM sections: ${Object.keys(bom).length} · DOM nodes: ${dom?.counts?.elements ?? 0}` : 'Light report (open bom/dom tab or Refresh for full inventory).',
+        classBits ? `Findings: ${classBits}.` : (huntEnabled ? (huntApplied ? 'Hunt on — no canary hits yet.' : 'Hunt on — hard-refresh so sources wrap.') : 'Hunt off.'),
+        `${watchMap.size} token watches · ${state.effects.length} API→DOM effects · ${networkExchanges.length} HTTP exchanges.`,
       ],
     };
   }
@@ -536,6 +800,12 @@
   function clearAll() {
     watchMap.clear();
     Object.keys(state).forEach((k) => { if (Array.isArray(state[k])) state[k] = []; });
+    recentApis.length = 0;
+    pendingEvents.length = 0;
+    lastHeavyAt = 0;
+    lastBom = null;
+    lastDom = null;
+    state.startedAt = Date.now();
     syncWatches();
   }
 
@@ -555,33 +825,41 @@
       };
       const a = document.createElement('a');
       a.href = URL.createObjectURL(new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' }));
-      a.download = `pfa-full-${Date.now()}.json`;
+      a.download = `dh-full-${Date.now()}.json`;
       a.click();
     });
   }
 
   // Tiny FAB only for optional Pick — does not cover the page
+  function ensureHighlightStyle() {
+    if (document.getElementById('pfa-hl-style')) return;
+    const st = document.createElement('style');
+    st.id = 'pfa-hl-style';
+    st.textContent = `#pfa-fab{all:initial;position:fixed;bottom:16px;right:16px;z-index:2147483646;width:44px;height:44px;
+        border-radius:22px;background:#00c878;color:#062816;font:700 11px/44px Inter,Segoe UI,sans-serif;text-align:center;
+        cursor:pointer;border:0}
+      #pfa-fab.on{background:#5b9dff;color:#fff}
+      #pfa-pick-mask{position:fixed;inset:0;z-index:2147483645;cursor:crosshair;background:transparent}
+      .pfa-hl{outline:3px solid #00c878!important;outline-offset:2px!important;background:rgba(0,200,120,.12)!important}`;
+    (document.head || document.documentElement).appendChild(st);
+  }
+
   function ensureFab() {
+    if (!collectEnabled) return null;
+    ensureHighlightStyle();
     if (fab && document.contains(fab)) return fab;
     fab = document.createElement('button');
     fab.id = 'pfa-fab';
     fab.type = 'button';
-    fab.title = 'PFA: Pick value (optional)';
-    fab.textContent = 'PFA';
-    fab.innerHTML = `<style>
-      #pfa-fab{all:initial;position:fixed;bottom:16px;right:16px;z-index:2147483646;width:44px;height:44px;
-        border-radius:22px;background:#00c878;color:#062816;font:700 11px/44px Segoe UI,sans-serif;text-align:center;
-        box-shadow:0 4px 14px rgba(0,0,0,.35);cursor:pointer;border:0}
-      #pfa-fab.on{background:#5b9dff;color:#fff}
-      #pfa-pick-mask{position:fixed;inset:0;z-index:2147483645;cursor:crosshair;background:transparent}
-      .pfa-hl{outline:3px solid #00c878!important;outline-offset:2px!important;background:rgba(0,200,120,.12)!important}
-    </style>PFA`;
+    fab.title = 'DOM Hacker: Pick value';
+    fab.textContent = 'DH';
     fab.onclick = (e) => { e.preventDefault(); e.stopPropagation(); togglePick(); };
     document.documentElement.appendChild(fab);
     return fab;
   }
 
   function togglePick(force) {
+    if (!collectEnabled) return false;
     pickMode = typeof force === 'boolean' ? force : !pickMode;
     ensureFab();
     fab.classList.toggle('on', pickMode);
@@ -616,14 +894,24 @@
     return pickMode;
   }
 
+  try {
   chrome.runtime.onMessage.addListener((msg, _s, sendResponse) => {
+    if (killIfDead()) return;
     if (msg?.type === 'PFA_GET_REPORT') {
-      buildReport(msg.heavy !== false).then((report) => {
-        sendResponse({ ok: true, report });
-      }).catch((e) => sendResponse({ ok: false, error: String(e) }));
+      buildReport(msg.heavy === true).then((report) => {
+        if (killIfDead()) return;
+        try { sendResponse({ ok: true, report }); } catch {}
+      }).catch((e) => {
+        try { sendResponse({ ok: false, error: String(e) }); } catch {}
+      });
       return true;
     }
     if (msg?.type === 'PFA_CLEAR') {
+      clearAll();
+      sendResponse({ ok: true });
+      return true;
+    }
+    if (msg?.type === 'PFA_PAGE_RESET') {
       clearAll();
       sendResponse({ ok: true });
       return true;
@@ -638,25 +926,123 @@
       return true;
     }
     if (msg?.type === 'PFA_SHOW_PANEL') {
-      chrome.runtime.sendMessage({ type: 'PFA_OPEN_SIDE_PANEL' }).catch(() => {});
+      pingBg({ type: 'PFA_OPEN_SIDE_PANEL' });
       sendResponse({ ok: true, note: 'use Chrome side panel' });
       return true;
     }
+    if (msg?.type === 'PFA_SET_ENABLED') {
+      setCollectEnabled(!!msg.enabled);
+      sendResponse({ ok: true, enabled: collectEnabled });
+      return true;
+    }
+    if (msg?.type === 'PFA_SET_HUNT') {
+      huntEnabled = !!msg.enabled;
+      tellMainHunt(huntEnabled);
+      sendResponse({ ok: true, huntEnabled, huntApplied });
+      return true;
+    }
+    if (msg?.type === 'PFA_HIGHLIGHT') {
+      highlightPath(msg.cssPath);
+      sendResponse({ ok: true });
+      return true;
+    }
   });
+  } catch {}
 
-  function boot() {
-    setTimeout(() => ensureFab(), 1500);
-    syncWatches();
-    chrome.runtime.sendMessage({ type: 'PFA_READY', pageUrl: location.href, title: document.title }).catch(() => {});
-    // Push full BOM/DOM periodically so side panel always has rich data
+  function highlightPath(path) {
+    try {
+      ensureHighlightStyle();
+      document.querySelectorAll('.pfa-hl').forEach((el) => el.classList.remove('pfa-hl'));
+      if (!path) return;
+      const el = document.querySelector(path);
+      if (!el) return;
+      el.classList.add('pfa-hl');
+      el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      setTimeout(() => el.classList.remove('pfa-hl'), 2500);
+    } catch {}
+  }
+
+  function stopPush() {
+    if (pushTimer) { clearInterval(pushTimer); pushTimer = null; }
+    if (pushTimeout) { clearTimeout(pushTimeout); pushTimeout = null; }
+  }
+
+  function startPush() {
+    stopPush();
     const push = () => {
-      buildReport(true).then((report) => {
-        chrome.runtime.sendMessage({ type: 'PFA_REPORT_PUSH', report }).catch(() => {});
+      if (killIfDead() || !collectEnabled) return;
+      buildReport(false).then((report) => {
+        pingBg({ type: 'PFA_REPORT_PUSH', report });
       }).catch(() => {});
     };
-    setTimeout(push, 2000);
-    setInterval(push, 4000);
+    pushTimeout = setTimeout(push, 2000);
+    pushTimer = setInterval(push, 4000);
   }
-  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);
-  else boot();
+
+  function setCollectEnabled(on) {
+    collectEnabled = !!on;
+    tellMainEnabled(collectEnabled);
+    if (collectEnabled) {
+      flushPending();
+      try {
+        chrome.storage.local.get({ huntEnabled: false }, (r) => {
+          if (chrome.runtime.lastError || killIfDead()) return;
+          huntEnabled = !!r.huntEnabled;
+          tellMainHunt(huntEnabled);
+        });
+      } catch { tellMainHunt(huntEnabled); }
+    }
+    if (!collectEnabled) {
+      pickMode = false;
+      document.getElementById('pfa-pick-mask')?.remove();
+      highlightEl?.classList.remove('pfa-hl');
+      highlightEl = null;
+      fab?.remove();
+      fab = null;
+      stopPush();
+      return;
+    }
+    boot();
+  }
+
+  function boot() {
+    if (!collectEnabled) return;
+    if (booted) {
+      ensureFab();
+      startPush();
+      return;
+    }
+    booted = true;
+    setTimeout(() => { if (collectEnabled) ensureFab(); }, 1500);
+    syncWatches();
+    pingBg({ type: 'PFA_READY', pageUrl: location.href, title: document.title });
+    startPush();
+  }
+
+  function startIfInScope() {
+    const tryCheck = (attempt) => {
+      if (killIfDead()) return;
+      try {
+        chrome.runtime.sendMessage({ type: 'PFA_SCOPE_CHECK' }, (res) => {
+          const err = chrome.runtime.lastError?.message || '';
+          if (err.includes('Extension context invalidated')) {
+            stopBackgroundWork();
+            return;
+          }
+          if (err) {
+            if (attempt < 5) setTimeout(() => tryCheck(attempt + 1), 200 * (attempt + 1));
+            else setCollectEnabled(false);
+            return;
+          }
+          setCollectEnabled(!!res?.enabled);
+        });
+      } catch {
+        stopBackgroundWork();
+      }
+    };
+    tryCheck(0);
+  }
+
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', startIfInScope);
+  else startIfInScope();
 })();
