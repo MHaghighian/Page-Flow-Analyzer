@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Flowscope</title>
+    <link rel="stylesheet" href="sidepanel.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <span class="logo" aria-hidden="true"></span>
+        <div class="brand-text">
+          <h1>Flowscope</h1>
+          <p class="tagline">Page analysis · passive core</p>
+        </div>
+      </div>
+      <span class="version" id="version">v0.1.0</span>
+    </header>
+
+    <main>
+      <div class="seg" id="scopeSeg" role="tablist" aria-label="Collection scope">
+        <button class="seg-btn" data-mode="tab" role="tab">This tab</button>
+        <button class="seg-btn" data-mode="origin" role="tab">This origin</button>
+        <button class="seg-btn" data-mode="all" role="tab">All</button>
+      </div>
+
+      <section class="card" id="statusCard">
+        <div class="card-head">
+          <span class="dot" id="statusDot" data-state="idle"></span>
+          <span class="status-label" id="statusLabel">Loading…</span>
+          <span class="scope-chip" id="scopeChip" hidden></span>
+        </div>
+
+        <!-- Single-tab view (hidden until the first render decides which view to show) -->
+        <dl class="meta" id="metaSingle" hidden>
+          <div class="meta-row">
+            <dt>Tab</dt>
+            <dd id="metaTitle" class="truncate">—</dd>
+          </div>
+          <div class="meta-row">
+            <dt>URL</dt>
+            <dd id="metaUrl" class="truncate mono">—</dd>
+          </div>
+        </dl>
+
+        <!-- Multi-tab view (origin / all) -->
+        <ul class="targets" id="metaList" hidden></ul>
+      </section>
+
+      <p class="hint" id="hint">
+        Focus the page you want to analyze, then choose <strong>This tab</strong>.
+      </p>
+
+      <div class="huntbar">
+        <button id="btnHunt" class="hunt-btn" aria-pressed="false">Hunt: off</button>
+        <span class="hunt-note" id="huntNote">Active canary taint. Off by default.</span>
+        <button id="btnExport" class="btn tiny" title="Download all captured data as JSON">Export</button>
+      </div>
+
+      <div class="tabbar" id="tabbar" role="tablist">
+        <button class="tab-btn" data-view="network" role="tab" aria-selected="true">Network</button>
+        <button class="tab-btn" data-view="messages" role="tab" aria-selected="false">Messages</button>
+        <button class="tab-btn" data-view="sinks" role="tab" aria-selected="false">Sinks</button>
+        <button class="tab-btn" data-view="traces" role="tab" aria-selected="false">Traces</button>
+        <button class="tab-btn" data-view="findings" role="tab" aria-selected="false">Findings</button>
+        <button class="tab-btn" data-view="inventory" role="tab" aria-selected="false">Inventory</button>
+      </div>
+
+      <section class="net" id="viewNetwork">
+        <div class="net-toolbar">
+          <span class="net-title">Network <span class="net-count" id="netCount">0</span></span>
+          <label class="toggle" title="Hide static assets and telemetry">
+            <input type="checkbox" id="hideNoise" checked /> Hide noise
+          </label>
+          <button class="btn tiny" id="btnRefresh" title="Refresh now">↻</button>
+          <button class="btn tiny" id="btnClearNet" title="Clear captured requests">Clear</button>
+        </div>
+        <input id="netFilter" class="net-filter" type="search" placeholder="Filter by URL…" autocomplete="off" />
+        <ul class="net-list" id="netList"></ul>
+        <p class="net-empty" id="netEmpty">
+          No requests captured yet. Reload the page (with the panel open) so the hooks load early.
+        </p>
+      </section>
+
+      <section class="net" id="viewMessages" hidden>
+        <div class="net-toolbar">
+          <span class="net-title">Messages <span class="net-count" id="msgCount">0</span></span>
+          <button class="btn tiny" id="btnRefreshMsg" title="Refresh now">↻</button>
+          <button class="btn tiny" id="btnClearMsg" title="Clear captured messages">Clear</button>
+        </div>
+        <input id="msgFilter" class="net-filter" type="search" placeholder="Filter postMessage / WebSocket…" autocomplete="off" />
+        <ul class="net-list" id="msgList"></ul>
+        <p class="net-empty" id="msgEmpty">
+          No messages captured yet. Reload the page (with the panel open) so the hooks load early.
+        </p>
+      </section>
+
+      <section class="net" id="viewSinks" hidden>
+        <div class="net-toolbar">
+          <span class="net-title">Sinks <span class="net-count" id="sinkCount">0</span></span>
+          <button class="btn tiny" id="btnRefreshSink" title="Refresh now">↻</button>
+          <button class="btn tiny" id="btnClearSink" title="Clear captured sinks">Clear</button>
+        </div>
+        <input id="sinkFilter" class="net-filter" type="search" placeholder="Filter sink / value…" autocomplete="off" />
+        <ul class="net-list" id="sinkList"></ul>
+        <p class="net-empty" id="sinkEmpty">
+          No sink calls captured yet. Reload the page (with the panel open) so the hooks load early.
+        </p>
+      </section>
+
+      <section class="net" id="viewTraces" hidden>
+        <div class="net-toolbar">
+          <span class="net-title">Traces <span class="net-count" id="traceCount">0</span></span>
+          <button class="btn tiny" id="btnRefreshTrace" title="Refresh now">↻</button>
+          <button class="btn tiny" id="btnClearTrace" title="Clear captured traces">Clear</button>
+        </div>
+        <input id="traceFilter" class="net-filter" type="search" placeholder="Filter source / sink / value…" autocomplete="off" />
+        <ul class="net-list" id="traceList"></ul>
+        <p class="net-empty" id="traceEmpty">
+          No source→sink traces yet. Reload with a token in the URL/hash, or interact so a source value reaches a sink.
+        </p>
+      </section>
+
+      <section class="net" id="viewFindings" hidden>
+        <div class="net-toolbar">
+          <span class="net-title">Findings <span class="net-count" id="findCount">0</span></span>
+          <button class="btn tiny" id="btnRefreshFind" title="Refresh now">↻</button>
+          <button class="btn tiny" id="btnClearFind" title="Clear captured findings">Clear</button>
+        </div>
+        <input id="findFilter" class="net-filter" type="search" placeholder="Filter source / sink…" autocomplete="off" />
+        <ul class="net-list" id="findList"></ul>
+        <p class="net-empty" id="findEmpty">
+          No canary findings. Turn <strong>Hunt</strong> on, hard-refresh the page, then drive the app — confirmed source→sink flows land here.
+        </p>
+      </section>
+
+      <section class="net" id="viewInventory" hidden>
+        <div class="net-toolbar">
+          <span class="net-title">Inventory</span>
+          <button class="btn tiny" id="btnRefreshInv" title="Refresh now">↻</button>
+        </div>
+        <div class="inv-body" id="invBody"></div>
+        <p class="net-empty" id="invEmpty">No inventory. Focus an http(s) tab.</p>
+      </section>
+    </main>
+
+    <script src="sidepanel.js"></script>
+  </body>
+</html>

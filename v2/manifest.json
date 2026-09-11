@@ -1,0 +1,38 @@
+{
+  "manifest_version": 3,
+  "name": "Flowscope",
+  "version": "0.1.0",
+  "description": "Client-side page analysis in a Chrome side panel. Passive by default; active Hunt mode is opt-in (coming later).",
+  "permissions": ["sidePanel", "storage", "tabs", "scripting", "activeTab"],
+  "host_permissions": ["<all_urls>"],
+  "background": { "service_worker": "background.js" },
+  "action": {
+    "default_title": "Open Flowscope side panel",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "content_scripts": [
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["content/main-hook.js"],
+      "run_at": "document_start",
+      "world": "MAIN",
+      "all_frames": false
+    },
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["content/collector.js"],
+      "run_at": "document_start",
+      "all_frames": false
+    }
+  ],
+  "side_panel": { "default_path": "ui/sidepanel.html" }
+}
