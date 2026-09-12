@@ -124,6 +124,23 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     return true;
   }
 
+  if (msg?.type === 'FS_GET_EFFECTS') {
+    (async () => {
+      sendResponse({ ok: true, ...(await collectFromScope('FS_GET_EFFECTS', 'effects')) });
+    })();
+    return true;
+  }
+
+  if (msg?.type === 'FS_HIGHLIGHT') {
+    (async () => {
+      const st = await describeScope();
+      const t = st.primary;
+      const res = t ? await askTab(t.tabId, { type: 'FS_HIGHLIGHT', ref: msg.ref, cssPath: msg.cssPath }) : null;
+      sendResponse({ ok: !!(res && res.ok) });
+    })();
+    return true;
+  }
+
   if (msg?.type === 'FS_GET_INVENTORY') {
     (async () => {
       const inv = await gatherInventory();
@@ -135,7 +152,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 
   if (msg?.type === 'FS_EXPORT') {
     (async () => {
-      sendResponse({ ok: true, data: await buildExport() });
+      sendResponse({ ok: true, data: await buildExport(msg.mode || 'full') });
     })();
     return true;
   }
@@ -289,32 +306,46 @@ async function gatherInventory() {
   return res?.ok ? { tabHost: t.host, url: t.url, dom: res.dom, bom: res.bom } : null;
 }
 
-/** Bundle everything for the pentest bot: one JSON object. */
-async function buildExport() {
-  const [network, messages, sinks, traces, findings] = await Promise.all([
+/**
+ * Bundle data for the pentest bot.
+ * mode 'signal' = security-relevant only (findings, traces, effects, sinks).
+ * mode 'full'   = everything (adds network, messages, inventory).
+ */
+async function buildExport(mode = 'full') {
+  const st = await describeScope();
+  const meta = {
+    tool: 'Flowscope',
+    version: chrome.runtime.getManifest().version,
+    schema: 1,
+    export: mode,
+    generatedAt: new Date().toISOString(),
+    scope: { mode: st.mode, label: st.label, origin: st.origin },
+    huntEnabled: st.huntEnabled,
+    tabs: st.targets.map((t) => ({ host: t.host, url: t.url, connected: t.connected })),
+  };
+
+  const [findings, traces, effects, sinks] = await Promise.all([
+    collectFromScope('FS_GET_FINDINGS', 'findings'),
+    collectFromScope('FS_GET_TRACES', 'traces'),
+    collectFromScope('FS_GET_EFFECTS', 'effects'),
+    collectFromScope('FS_GET_SINKS', 'sinks'),
+  ]);
+
+  const out = {
+    meta,
+    findings: findings.findings,
+    traces: traces.traces,
+    effects: effects.effects,
+    sinks: sinks.sinks,
+  };
+  if (mode === 'signal') return out;
+
+  const [network, messages] = await Promise.all([
     collectFromScope('FS_GET_NETWORK', 'exchanges'),
     collectFromScope('FS_GET_MESSAGES', 'messages'),
-    collectFromScope('FS_GET_SINKS', 'sinks'),
-    collectFromScope('FS_GET_TRACES', 'traces'),
-    collectFromScope('FS_GET_FINDINGS', 'findings'),
   ]);
-  const inventory = await gatherInventory();
-  const st = await describeScope();
-  return {
-    meta: {
-      tool: 'Flowscope',
-      version: chrome.runtime.getManifest().version,
-      schema: 1,
-      generatedAt: new Date().toISOString(),
-      scope: { mode: st.mode, label: st.label, origin: st.origin },
-      huntEnabled: st.huntEnabled,
-      tabs: st.targets.map((t) => ({ host: t.host, url: t.url, connected: t.connected })),
-    },
-    network: network.exchanges,
-    messages: messages.messages,
-    sinks: sinks.sinks,
-    traces: traces.traces,
-    findings: findings.findings,
-    inventory,
-  };
+  out.network = network.exchanges;
+  out.messages = messages.messages;
+  out.inventory = await gatherInventory();
+  return out;
 }

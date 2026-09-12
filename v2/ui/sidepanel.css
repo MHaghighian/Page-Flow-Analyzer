@@ -511,6 +511,21 @@ main { padding: 16px; }
 .find-sink { color: var(--danger); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .find-class { font-size: 9px; text-transform: uppercase; letter-spacing: 0.4px; color: var(--text-faint); }
 
+/* ---- Effect rows ---- */
+.eff-summary { padding: 8px 9px; cursor: pointer; font-size: 12px; }
+.eff-summary:hover { background: var(--bg-elev-2); }
+.eff-flow { display: flex; align-items: center; gap: 6px; font-family: var(--mono); font-size: 11px; overflow: hidden; }
+.eff-host { color: var(--accent); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 45%; }
+.eff-arrow { color: var(--text-faint); flex: none; }
+.eff-node { color: #7bd88f; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.eff-val { color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; margin-top: 3px; }
+.hl-btn { appearance: none; border: 1px solid var(--border); background: var(--bg-elev-2); color: var(--accent); font-size: 11px; padding: 4px 9px; border-radius: 6px; cursor: pointer; margin-top: 8px; }
+.hl-btn:hover { border-color: var(--accent-dim); }
+.eff-nodeitem { padding: 7px 0; border-top: 1px solid var(--border); }
+.eff-nodehdr { display: flex; align-items: center; gap: 7px; }
+.eff-css { font-family: var(--mono); font-size: 10px; color: var(--text-faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.eff-nodeitem .sev.high { padding: 1px 6px; }
+
 /* ---- Inventory ---- */
 .inv-body { display: flex; flex-direction: column; gap: 8px; }
 .inv-sec { background: var(--bg-elev); border: 1px solid var(--border); border-radius: 8px; }

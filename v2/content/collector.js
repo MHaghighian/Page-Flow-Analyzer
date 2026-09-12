@@ -11,12 +11,14 @@
   const MAX_SINKS = 400;
   const MAX_TRACES = 400;
   const MAX_FINDINGS = 400;
+  const MAX_EFFECTS = 400;
   const order = []; // exchange ids, oldest first
   const byId = new Map(); // id -> exchange
   const msgs = []; // message records, oldest first
   const sinks = []; // sink records, oldest first
   const traces = []; // source->sink traces, oldest first
   const findings = []; // canary-confirmed findings, oldest first
+  const effects = []; // API-response-into-DOM effects, oldest first
 
   function trim() {
     while (order.length > MAX_EXCHANGES) {
@@ -58,7 +60,14 @@
       return;
     }
 
-    if (d && d.__fshunt === true) return; // our own hunt-enable signal to MAIN
+    if (d && d.__fseffect === true) {
+      const { __fseffect, ...rec } = d;
+      effects.push(rec);
+      if (effects.length > MAX_EFFECTS) effects.shift();
+      return;
+    }
+
+    if (d && (d.__fshunt === true || d.__fshl === true)) return; // our own signals to MAIN
 
     if (!d || d.__fsnet !== true) return;
 
@@ -112,6 +121,24 @@
 
   function findingSnapshot(limit = 300) {
     return findings.slice(-limit).reverse(); // newest first
+  }
+
+  function effectSnapshot(limit = 300) {
+    return effects.slice(-limit).reverse(); // newest first
+  }
+
+  function highlight(sel) {
+    try {
+      const el = document.querySelector(sel);
+      if (!el) return false;
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      const prev = el.style.outline;
+      const prevOff = el.style.outlineOffset;
+      el.style.outline = '3px solid #5b9dff';
+      el.style.outlineOffset = '2px';
+      setTimeout(() => { el.style.outline = prev; el.style.outlineOffset = prevOff; }, 2200);
+      return true;
+    } catch { return false; }
   }
 
   function cssPathMini(el) {
@@ -244,8 +271,22 @@
       sendResponse({ ok: true, findings: findingSnapshot(msg.limit || 300) });
       return;
     }
+    if (msg?.type === 'FS_GET_EFFECTS') {
+      sendResponse({ ok: true, effects: effectSnapshot(msg.limit || 300) });
+      return;
+    }
     if (msg?.type === 'FS_GET_INVENTORY') {
       sendResponse({ ok: true, dom: domInventory(), bom: bomInventory() });
+      return;
+    }
+    if (msg?.type === 'FS_HIGHLIGHT') {
+      if (msg.ref) {
+        // MAIN holds the live node (survives class/attr rewrites); ask it to highlight.
+        try { window.postMessage({ __fshl: true, ref: msg.ref }, '*'); } catch {}
+        sendResponse({ ok: true });
+      } else {
+        sendResponse({ ok: highlight(msg.cssPath) });
+      }
       return;
     }
     if (msg?.type === 'FS_SET_HUNT') {
@@ -260,6 +301,7 @@
       if (what === 'sinks' || what === 'all') { sinks.length = 0; }
       if (what === 'traces' || what === 'all') { traces.length = 0; }
       if (what === 'findings' || what === 'all') { findings.length = 0; }
+      if (what === 'effects' || what === 'all') { effects.length = 0; }
       sendResponse({ ok: true });
       return;
     }

@@ -55,7 +55,8 @@
       <div class="huntbar">
         <button id="btnHunt" class="hunt-btn" aria-pressed="false">Hunt: off</button>
         <span class="hunt-note" id="huntNote">Active canary taint. Off by default.</span>
-        <button id="btnExport" class="btn tiny" title="Download all captured data as JSON">Export</button>
+        <button id="btnExportKey" class="btn tiny" title="Export findings, traces, effects, sinks only">Export key</button>
+        <button id="btnExport" class="btn tiny" title="Download all captured data as JSON">Export all</button>
       </div>
 
       <div class="tabbar" id="tabbar" role="tablist">
@@ -64,6 +65,7 @@
         <button class="tab-btn" data-view="sinks" role="tab" aria-selected="false">Sinks</button>
         <button class="tab-btn" data-view="traces" role="tab" aria-selected="false">Traces</button>
         <button class="tab-btn" data-view="findings" role="tab" aria-selected="false">Findings</button>
+        <button class="tab-btn" data-view="effects" role="tab" aria-selected="false">Effects</button>
         <button class="tab-btn" data-view="inventory" role="tab" aria-selected="false">Inventory</button>
       </div>
 
@@ -132,6 +134,19 @@
         <ul class="net-list" id="findList"></ul>
         <p class="net-empty" id="findEmpty">
           No canary findings. Turn <strong>Hunt</strong> on, hard-refresh the page, then drive the app — confirmed source→sink flows land here.
+        </p>
+      </section>
+
+      <section class="net" id="viewEffects" hidden>
+        <div class="net-toolbar">
+          <span class="net-title">Effects <span class="net-count" id="effCount">0</span></span>
+          <button class="btn tiny" id="btnRefreshEff" title="Refresh now">↻</button>
+          <button class="btn tiny" id="btnClearEff" title="Clear captured effects">Clear</button>
+        </div>
+        <input id="effFilter" class="net-filter" type="search" placeholder="Filter host / node / value…" autocomplete="off" />
+        <ul class="net-list" id="effList"></ul>
+        <p class="net-empty" id="effEmpty">
+          No effects yet. API response value rendered into the DOM shows here. Drive the app so it fetches + renders data.
         </p>
       </section>
 

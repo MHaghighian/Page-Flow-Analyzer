@@ -133,11 +133,12 @@
         const base = { phase: 'response', id, status: res.status, ok: res.ok, contentType, resHeaders, durationMs };
         if (category !== 'static' && textual(contentType)) {
           res.clone().text().then(
-            (t) => { post({ ...base, resBody: cap(t), resBytes: t.length }); addWatchAll(extractInteresting(t), 'network.response ' + hostOf(url)); scanCanary(t, { channel: 'network.response', sink: 'response ' + hostOf(url) }); },
+            (t) => { post({ ...base, resBody: cap(t), resBytes: t.length }); addWatchAll(extractInteresting(t), 'network.response ' + hostOf(url)); scanCanary(t, { channel: 'network.response', sink: 'response ' + hostOf(url) }); storeApiResponse(t, url, hostOf(url)); },
             () => post(base)
           );
         } else {
           post(base);
+          if (category !== 'static') storeApiResponse('', url, hostOf(url));
         }
       }, (err) => {
         post({ phase: 'response', id, status: 0, ok: false, error: String(err), durationMs: Date.now() - startedAt });
@@ -208,7 +209,8 @@
                 if (rt === '' || rt === 'text') resBody = cap(this.responseText);
                 else if (rt === 'json') resBody = cap(JSON.stringify(this.response));
               } catch {}
-              if (resBody !== undefined) { addWatchAll(extractInteresting(resBody), 'network.response ' + hostOf(meta.url)); scanCanary(resBody, { channel: 'network.response', sink: 'response ' + hostOf(meta.url) }); }
+              if (resBody !== undefined) { addWatchAll(extractInteresting(resBody), 'network.response ' + hostOf(meta.url)); scanCanary(resBody, { channel: 'network.response', sink: 'response ' + hostOf(meta.url) }); storeApiResponse(resBody, meta.url, hostOf(meta.url)); }
+              else if (category !== 'static') storeApiResponse('', meta.url, hostOf(meta.url));
             }
             post(resBody !== undefined ? { ...base, resBody, resBytes: resBody.length } : base);
           } catch {}
@@ -258,7 +260,7 @@
   // Incoming postMessage — ignore our own bridge frames.
   window.addEventListener('message', (e) => {
     const d = e.data;
-    if (d && (d.__fsnet || d.__fsmsg || d.__fssink || d.__fstrace || d.__fsfinding || d.__fshunt)) return;
+    if (d && (d.__fsnet || d.__fsmsg || d.__fssink || d.__fstrace || d.__fsfinding || d.__fseffect || d.__fshunt || d.__fshl)) return;
     try {
       const text = hay(d);
       emitMsg({ kind: 'pm', dir: 'in', origin: e.origin || '', data: cap(text) });
@@ -605,4 +607,115 @@
   // Synchronous early-apply: the collector persists the flag in localStorage, which
   // we can read at document_start — so getters are poisoned BEFORE the page reads them.
   try { if (localStorage.getItem('__FS_HUNT__') === '1') applyHunt(); } catch {}
+
+  // ---- Effects: DOM changes triggered by an AJAX/XHR response (time-window) ----
+  // Every non-static response opens a short window. Any DOM mutation inside the
+  // window is attributed to that response = full coverage. A string match against
+  // the response body is recorded as a confidence flag, not a filter.
+  const EFFECT_WINDOW_MS = 1800;
+  const MAX_NODES = 60;
+  const activeWindows = [];
+  const effNodes = new Map(); // ref -> live DOM node, for highlight
+
+  function extractApiStrings(text) {
+    const s = String(text || '').slice(0, 24000);
+    const out = [];
+    const walk = (v, d) => {
+      if (d > 6 || out.length > 60 || v == null) return;
+      if (typeof v === 'string') { if (v.length >= 4 && v.length <= 200) out.push(v); return; }
+      if (typeof v === 'number') { const n = String(v); if (n.length >= 4) out.push(n); return; }
+      if (Array.isArray(v)) { v.slice(0, 60).forEach((x) => walk(x, d + 1)); return; }
+      if (typeof v === 'object') Object.values(v).slice(0, 60).forEach((x) => walk(x, d + 1));
+    };
+    try { walk(JSON.parse(s), 0); }
+    catch { for (const m of s.matchAll(/["']([^"']{4,200})["']/g)) { if (out.length > 60) break; out.push(m[1]); } }
+    return [...new Set(out)].filter((s) => s.length >= 6).slice(0, 80);
+  }
+
+  // Called on every non-static response: opens an effect window.
+  function storeApiResponse(body, url, host) {
+    const w = {
+      id: 'E' + ++seq + '-' + Date.now(), url, host,
+      t: Date.now(), deadline: Date.now() + EFFECT_WINDOW_MS,
+      strings: extractApiStrings(body), nodes: [], matches: 0, flushed: false,
+    };
+    activeWindows.push(w);
+    while (activeWindows.length > 12) activeWindows.shift();
+    setTimeout(() => flushWindow(w), EFFECT_WINDOW_MS + 20);
+  }
+
+  function pickWindow(now) {
+    for (let i = activeWindows.length - 1; i >= 0; i--) {
+      const w = activeWindows[i];
+      if (!w.flushed && w.t <= now && now <= w.deadline) return w; // nearest preceding response
+    }
+    return null;
+  }
+
+  function addMutation(node, sinkType) {
+    const w = pickWindow(Date.now());
+    if (!w || w.nodes.length >= MAX_NODES) return;
+    const el = node.nodeType === 1 ? node : node.parentElement;
+    let text = node.nodeType === 3 ? (node.data || '') : (node.textContent || '');
+    if (text.length > 200) text = text.slice(0, 200);
+    const tag = node.nodeType === 1 ? node.nodeName.toLowerCase() : '#text';
+    let match = false;
+    if (text) for (const s of w.strings) { if (text.indexOf(s) >= 0) { match = true; break; } }
+    if (match) w.matches++;
+    // Stamp a stable ref so highlight works regardless of class/selector quirks.
+    let ref = '';
+    if (el) {
+      ref = w.id + '_' + w.nodes.length;
+      try { el.setAttribute('data-fsref', ref); } catch {}
+      effNodes.set(ref, el);
+      if (effNodes.size > 1200) effNodes.delete(effNodes.keys().next().value);
+    }
+    w.nodes.push({ tag, css: el ? cssPath(el) : '', ref, text, match, sink: sinkType });
+  }
+
+  function flushWindow(w) {
+    if (w.flushed) return;
+    w.flushed = true;
+    const idx = activeWindows.indexOf(w);
+    if (idx >= 0) activeWindows.splice(idx, 1);
+    if (!w.nodes.length) return;
+    try {
+      nativePost({
+        __fseffect: true, id: w.id, t: w.t, url: w.url, host: w.host,
+        nodeCount: w.nodes.length, matchCount: w.matches, nodes: w.nodes,
+      }, '*');
+    } catch {}
+  }
+
+  function startEffects() {
+    try {
+      const obs = new MutationObserver((muts) => {
+        if (!activeWindows.length) return; // no recent AJAX — ignore unrelated churn
+        for (const m of muts) {
+          if (m.type === 'childList') m.addedNodes.forEach((n) => { if (n.nodeType === 1 || n.nodeType === 3) addMutation(n, 'childList'); });
+          else if (m.type === 'characterData') addMutation(m.target, 'characterData');
+        }
+      });
+      obs.observe(document.documentElement || document, { childList: true, subtree: true, characterData: true });
+    } catch {}
+  }
+  if (document.documentElement) startEffects();
+  else document.addEventListener('DOMContentLoaded', startEffects);
+
+  // Highlight request from the collector: look up the live node we captured.
+  window.addEventListener('message', (e) => {
+    if (e.source !== window) return;
+    const d = e.data;
+    if (!d || d.__fshl !== true) return;
+    const el = effNodes.get(d.ref);
+    if (el && document.contains(el)) {
+      try {
+        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        const p = el.style.outline, po = el.style.outlineOffset;
+        el.style.outline = '3px solid #5b9dff';
+        el.style.outlineOffset = '2px';
+        setTimeout(() => { el.style.outline = p; el.style.outlineOffset = po; }, 2200);
+      } catch {}
+    }
+  }, false);
 })();

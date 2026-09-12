@@ -15,6 +15,7 @@ const els = {
   btnHunt: document.getElementById('btnHunt'),
   huntNote: document.getElementById('huntNote'),
   btnExport: document.getElementById('btnExport'),
+  btnExportKey: document.getElementById('btnExportKey'),
   // content tabs
   tabbar: document.getElementById('tabbar'),
   viewNetwork: document.getElementById('viewNetwork'),
@@ -22,6 +23,7 @@ const els = {
   viewSinks: document.getElementById('viewSinks'),
   viewTraces: document.getElementById('viewTraces'),
   viewFindings: document.getElementById('viewFindings'),
+  viewEffects: document.getElementById('viewEffects'),
   viewInventory: document.getElementById('viewInventory'),
   invBody: document.getElementById('invBody'),
   invEmpty: document.getElementById('invEmpty'),
@@ -62,6 +64,13 @@ const els = {
   findFilter: document.getElementById('findFilter'),
   findList: document.getElementById('findList'),
   findEmpty: document.getElementById('findEmpty'),
+  // effects
+  effCount: document.getElementById('effCount'),
+  btnRefreshEff: document.getElementById('btnRefreshEff'),
+  btnClearEff: document.getElementById('btnClearEff'),
+  effFilter: document.getElementById('effFilter'),
+  effList: document.getElementById('effList'),
+  effEmpty: document.getElementById('effEmpty'),
 };
 
 const MAX_LIST = 8;
@@ -835,6 +844,118 @@ els.btnClearFind.addEventListener('click', async () => {
 });
 els.btnRefreshFind.addEventListener('click', () => { refreshStatus(); refreshFindings(); });
 
+/* ---------------- effects (API response -> DOM) ---------------- */
+
+let rawEffects = [];
+let openEid = null;
+let lastEffKey = '';
+
+function effDetailHtml(ef) {
+  const rows = [
+    kv('Response', ef.url),
+    kv('Nodes changed', ef.nodeCount),
+    kv('Value matches', ef.matchCount || 0),
+  ];
+  if (multiTab && ef.tabHost) rows.push(kv('Tab', ef.tabHost));
+  rows.push(kv('Time', fmtTime(ef.t)));
+  let h = `<dl class="kv">${rows.join('')}</dl><h4>Changed nodes</h4>`;
+  h += (ef.nodes || []).map((n) => `
+    <div class="eff-nodeitem">
+      <div class="eff-nodehdr">
+        <span class="eff-node">${esc(n.tag)}</span>
+        <span class="eff-css">${esc(n.css || '')}</span>
+        ${n.match ? '<span class="sev high">match</span>' : ''}
+      </div>
+      ${n.text ? `<div class="eff-val">${esc(n.text)}</div>` : ''}
+      ${(n.ref || n.css) ? `<button class="hl-btn" data-ref="${esc(n.ref || '')}" data-hl="${esc(n.css || '')}">Highlight</button>` : ''}
+    </div>`).join('');
+  return h;
+}
+
+function effRowHtml(ef) {
+  const open = openEid === ef.id;
+  const first = (ef.nodes && ef.nodes[0]) || {};
+  const preview = String(first.text || first.css || '').replace(/\s+/g, ' ').slice(0, 120);
+  const label = `${ef.nodeCount} node${ef.nodeCount === 1 ? '' : 's'}${ef.matchCount ? ' · ' + ef.matchCount + ' matched' : ''}`;
+  return `<li class="net-row ${open ? 'open' : ''}" data-eid="${esc(ef.id)}">
+    <div class="eff-summary">
+      <div class="eff-flow">
+        <span class="eff-host">${esc(ef.host || '')}</span>
+        <span class="eff-arrow">→</span>
+        <span class="eff-node">${esc(label)}</span>
+      </div>
+      <span class="eff-val">${esc(preview)}</span>
+    </div>
+    ${open ? `<div class="net-detail">${effDetailHtml(ef)}</div>` : ''}
+  </li>`;
+}
+
+function filteredEffects() {
+  const q = els.effFilter.value.trim().toLowerCase();
+  if (!q) return rawEffects;
+  return rawEffects.filter((ef) => {
+    const nodeText = (ef.nodes || []).map((n) => `${n.tag} ${n.css} ${n.text}`).join(' ');
+    return `${ef.host || ''} ${ef.url || ''} ${nodeText}`.toLowerCase().includes(q);
+  });
+}
+
+function renderEffects(force = false) {
+  const list = filteredEffects();
+  const key = els.effFilter.value.trim() + '|' + openEid + '|' + list.map((e) => e.id).join(',');
+  if (!force && key === lastEffKey) return;
+  lastEffKey = key;
+
+  els.effCount.textContent = String(list.length);
+  if (!list.length) {
+    els.effList.innerHTML = '';
+    els.effEmpty.hidden = false;
+    return;
+  }
+  els.effEmpty.hidden = true;
+  const scroll = els.effList.scrollTop;
+  els.effList.innerHTML = list.map(effRowHtml).join('');
+  els.effList.scrollTop = scroll;
+}
+
+let effInFlight = false;
+async function refreshEffects() {
+  if (effInFlight) return;
+  effInFlight = true;
+  try {
+    const res = await send({ type: 'FS_GET_EFFECTS' });
+    rawEffects = res?.effects || [];
+    renderEffects(false);
+  } finally {
+    effInFlight = false;
+  }
+}
+
+els.effList.addEventListener('click', (e) => {
+  const hl = e.target.closest('.hl-btn');
+  if (hl) { send({ type: 'FS_HIGHLIGHT', ref: hl.dataset.ref, cssPath: hl.dataset.hl }); return; }
+  const row = e.target.closest('.net-row');
+  if (!row) return;
+  if (e.target.closest('.net-detail')) return;
+  if (window.getSelection && String(window.getSelection()).length) return;
+  const id = row.dataset.eid;
+  openEid = openEid === id ? null : id;
+  renderEffects(true);
+});
+
+let effFilterDeb = null;
+els.effFilter.addEventListener('input', () => {
+  clearTimeout(effFilterDeb);
+  effFilterDeb = setTimeout(() => renderEffects(true), 150);
+});
+els.btnClearEff.addEventListener('click', async () => {
+  await send({ type: 'FS_CLEAR', what: 'effects' });
+  openEid = null;
+  rawEffects = [];
+  renderEffects(true);
+  refreshEffects();
+});
+els.btnRefreshEff.addEventListener('click', () => { refreshStatus(); refreshEffects(); });
+
 /* ---------------- inventory ---------------- */
 
 function invPre(obj) { return `<pre>${esc(JSON.stringify(obj, null, 2))}</pre>`; }
@@ -899,13 +1020,14 @@ els.btnRefreshInv.addEventListener('click', () => refreshInventory(true));
 
 /* ---------------- export ---------------- */
 
-els.btnExport.addEventListener('click', async () => {
-  els.btnExport.disabled = true;
+async function doExport(mode, btn) {
+  btn.disabled = true;
   try {
-    const res = await send({ type: 'FS_EXPORT' });
+    const res = await send({ type: 'FS_EXPORT', mode });
     if (!res?.ok || !res.data) { setHint('Export failed.', true); return; }
     const host = res.data?.inventory?.tabHost || res.data?.meta?.scope?.label || 'page';
-    const name = 'flowscope-' + String(host).replace(/[^a-z0-9.-]/gi, '_') + '-' + Date.now() + '.json';
+    const tag = mode === 'signal' ? 'key' : 'full';
+    const name = 'flowscope-' + tag + '-' + String(host).replace(/[^a-z0-9.-]/gi, '_') + '-' + Date.now() + '.json';
     const blob = new Blob([JSON.stringify(res.data, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -914,9 +1036,11 @@ els.btnExport.addEventListener('click', async () => {
     setTimeout(() => URL.revokeObjectURL(url), 2000);
     setHint('Exported ' + name);
   } finally {
-    els.btnExport.disabled = false;
+    btn.disabled = false;
   }
-});
+}
+els.btnExport.addEventListener('click', () => doExport('full', els.btnExport));
+els.btnExportKey.addEventListener('click', () => doExport('signal', els.btnExportKey));
 
 /* ---------------- content tabs ---------------- */
 
@@ -928,6 +1052,7 @@ function setView(v) {
   els.viewSinks.hidden = v !== 'sinks';
   els.viewTraces.hidden = v !== 'traces';
   els.viewFindings.hidden = v !== 'findings';
+  els.viewEffects.hidden = v !== 'effects';
   els.viewInventory.hidden = v !== 'inventory';
   for (const b of els.tabbar.querySelectorAll('.tab-btn')) {
     b.setAttribute('aria-selected', String(b.dataset.view === v));
@@ -954,6 +1079,7 @@ async function chooseMode(mode) {
   refreshSinks();
   refreshTraces();
   refreshFindings();
+  refreshEffects();
   if (activeView === 'inventory') refreshInventory();
 }
 
@@ -963,7 +1089,7 @@ els.seg.addEventListener('click', (e) => {
 });
 
 function tick() {
-  refreshStatus(); refreshNetwork(); refreshMessages(); refreshSinks(); refreshTraces(); refreshFindings();
+  refreshStatus(); refreshNetwork(); refreshMessages(); refreshSinks(); refreshTraces(); refreshFindings(); refreshEffects();
   // inventory is not polled — it rebuilds fully and would reset open <details>; refresh on demand only
 }
 
